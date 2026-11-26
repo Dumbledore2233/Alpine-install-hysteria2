@@ -27,8 +27,8 @@ get_cap_net_admin() {
 
 HAS_NET_ADMIN=$(get_cap_net_admin)
 
-prompt_single_port() {
-    local prompt_label="${1:-单个监听端口}"
+prompt_port_or_range() {
+    local prompt_label="${1:-监听端口或端口范围}"
     local current_default="${2:-}"
     local default_port="$current_default"
     if [ -z "$default_port" ]; then
@@ -36,51 +36,38 @@ prompt_single_port() {
     fi
 
     while true; do
-        read -r -p "请输入 Hysteria 2 ${prompt_label} [默认 $default_port]（例如：20000）: " SINGLE_PORT_INPUT
-        SINGLE_PORT_INPUT=${SINGLE_PORT_INPUT:-$default_port}
+        if [ "$HAS_NET_ADMIN" -eq 1 ]; then
+            read -r -p "请输入 Hysteria 2 ${prompt_label} [默认 $default_port]（单端口示例：20000；端口范围示例：30000-40000）: " PORT_INPUT
+        else
+            read -r -p "请输入 Hysteria 2 单个${prompt_label} [默认 $default_port]（例如：20000；当前不允许输入端口范围）: " PORT_INPUT
+        fi
 
-        if [[ "$SINGLE_PORT_INPUT" =~ ^[0-9]{1,5}$ ]]; then
-            p_num=$((10#${BASH_REMATCH[0]}))
-            if (( p_num >= 1 && p_num <= 65535 )); then
-                SINGLE_PORT_INPUT="$p_num"
+        PORT_INPUT=${PORT_INPUT:-$default_port}
+
+        if [ "$HAS_NET_ADMIN" -eq 0 ] && [[ "$PORT_INPUT" == *-* ]]; then
+            echo "错误：当前进程缺少 CAP_NET_ADMIN，只允许输入单个端口，请重新输入。"
+            continue
+        fi
+
+        if [[ "$PORT_INPUT" =~ ^([0-9]{1,5})(-([0-9]{1,5}))?$ ]]; then
+            START_PORT=$((10#${BASH_REMATCH[1]}))
+            END_PORT=$START_PORT
+            if [ -n "${BASH_REMATCH[3]:-}" ]; then
+                END_PORT=$((10#${BASH_REMATCH[3]}))
+            fi
+            if (( START_PORT >= 1 && START_PORT <= 65535 &&
+                  END_PORT >= 1 && END_PORT <= 65535 &&
+                  START_PORT <= END_PORT )); then
+                if [ -n "${BASH_REMATCH[3]:-}" ]; then
+                    PORT_INPUT="${START_PORT}-${END_PORT}"
+                else
+                    PORT_INPUT="${START_PORT}"
+                fi
+                FIRST_PORT="$START_PORT"
                 return 0
             fi
         fi
-        echo "错误：端口格式无效。请输入 1-65535 范围内的单个端口号。"
-    done
-}
-
-prompt_port_hop_range() {
-    local allow_empty="${1:-1}"
-    local current_default="${2:-}"
-    local tip_default=""
-    if [ -n "$current_default" ]; then
-        tip_default=" [默认 $current_default]"
-    elif [ "$allow_empty" -eq 1 ]; then
-        tip_default=" [回车跳过端口跳跃]"
-    fi
-
-    while true; do
-        read -r -p "请输入 Hysteria 2 端口跳跃范围${tip_default}（格式：起始端口-结束端口，例如：30000-40000）: " HOP_RANGE_INPUT
-        if [ -z "$HOP_RANGE_INPUT" ]; then
-            if [ -n "$current_default" ]; then
-                HOP_RANGE_INPUT="$current_default"
-                return 0
-            elif [ "$allow_empty" -eq 1 ]; then
-                HOP_RANGE_INPUT=""
-                return 0
-            fi
-        fi
-
-        if [[ "$HOP_RANGE_INPUT" =~ ^([0-9]{1,5})-([0-9]{1,5})$ ]]; then
-            s_p=$((10#${BASH_REMATCH[1]}))
-            e_p=$((10#${BASH_REMATCH[2]}))
-            if (( s_p >= 1 && s_p <= 65535 && e_p >= 1 && e_p <= 65535 && s_p <= e_p )); then
-                HOP_RANGE_INPUT="${s_p}-${e_p}"
-                return 0
-            fi
-        fi
-        echo "错误：端口跳跃范围无效。请输入 1-65535 范围内的合法起止端口（如 30000-40000，起始 <= 结束）。"
+        echo "错误：端口格式无效。请输入 1-65535 范围内的端口，或合法的起止端口范围。"
     done
 }
 
@@ -136,15 +123,13 @@ ensure_cert() {
 
 write_config() {
     local listen_spec="$1"
-    local hop_range="$2"
-    local password="$3"
-    local up_bw="$4"
-    local down_bw="$5"
+    local password="$2"
+    local up_bw="$3"
+    local down_bw="$4"
 
     mkdir -p /etc/hysteria
     cat > "$CONFIG_FILE" <<EOF
 listen: :$listen_spec
-# port_hopping: ${hop_range:-none}
 
 # 有域名时可改用 ACME/CA 证书
 # acme:
@@ -208,8 +193,6 @@ restart_and_check_service() {
 
 read_config_values() {
     local raw_listen=""
-    local raw_hop=""
-
     raw_listen=$(awk '
         /^listen:[[:space:]]*/ {
             sub(/^listen:[[:space:]]*/, "", $0)
@@ -222,26 +205,13 @@ read_config_values() {
         }
     ' "$CONFIG_FILE" 2>/dev/null || true)
 
-    raw_hop=$(awk '
-        /^#[[:space:]]*port_hopping:[[:space:]]*/ {
-            sub(/^#[[:space:]]*port_hopping:[[:space:]]*/, "", $0)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
-            print $0
-            exit
-        }
-    ' "$CONFIG_FILE" 2>/dev/null || true)
-
     CFG_LISTEN="$raw_listen"
     if [[ "$raw_listen" == *-* ]]; then
         CFG_PORT="${raw_listen%%-*}"
         CFG_HOP_RANGE="$raw_listen"
     else
         CFG_PORT="$raw_listen"
-        if [ -n "$raw_hop" ] && [ "$raw_hop" != "none" ]; then
-            CFG_HOP_RANGE="$raw_hop"
-        else
-            CFG_HOP_RANGE="无（未配置端口跳跃）"
-        fi
+        CFG_HOP_RANGE="无（未配置端口跳跃）"
     fi
 
     CFG_PASS=$(awk '
@@ -379,15 +349,6 @@ update_config_key() {
     fi
 }
 
-update_hop_comment() {
-    local hop_val="$1"
-    if grep -qE "^#[[:space:]]*port_hopping:" "$CONFIG_FILE"; then
-        sed -i -E "s|^#[[:space:]]*port_hopping:.*|# port_hopping: ${hop_val}|" "$CONFIG_FILE"
-    else
-        sed -i -E "1a # port_hopping: ${hop_val}" "$CONFIG_FILE"
-    fi
-}
-
 update_bandwidth_in_config() {
     local up_val="$1"
     local down_val="$2"
@@ -429,15 +390,14 @@ manage_menu() {
         case "$choice" in
             1)
                 read_config_values
-                prompt_single_port "新的单个监听端口" "${CFG_PORT:-20000}"
-                update_config_key "listen" ":${SINGLE_PORT_INPUT}"
-                update_hop_comment "none"
+                prompt_port_or_range "新的监听端口或端口范围" "${CFG_LISTEN:-20000}"
+                update_config_key "listen" ":${PORT_INPUT}"
                 restart_and_check_service
-                echo "端口已更新为 :${SINGLE_PORT_INPUT}"
+                echo "端口已更新为 :${PORT_INPUT}"
                 ;;
             2)
                 if [ "$HAS_NET_ADMIN" -eq 0 ]; then
-                    echo "错误：当前进程缺少 CAP_NET_ADMIN，无法配置端口跳跃范围。"
+                    echo "错误：当前进程缺少 CAP_NET_ADMIN，不支持端口跳跃，已拒绝修改端口跳跃。"
                     continue
                 fi
                 read_config_values
@@ -445,11 +405,25 @@ manage_menu() {
                 if [[ "${CFG_HOP_RANGE:-}" == *-* ]]; then
                     default_hop="$CFG_HOP_RANGE"
                 fi
-                prompt_port_hop_range "0" "$default_hop"
-                update_config_key "listen" ":${HOP_RANGE_INPUT}"
-                update_hop_comment "$HOP_RANGE_INPUT"
-                restart_and_check_service
-                echo "端口跳跃范围已更新为 :${HOP_RANGE_INPUT}"
+                while true; do
+                    if [ -n "$default_hop" ]; then
+                        read -r -p "请输入新的端口跳跃范围 [默认 $default_hop]（格式：起始端口-结束端口，例如：30000-40000）: " new_range
+                        new_range=${new_range:-$default_hop}
+                    else
+                        read -r -p "请输入新的端口跳跃范围（格式：起始端口-结束端口，例如：30000-40000）: " new_range
+                    fi
+                    if [[ "$new_range" =~ ^([0-9]{1,5})-([0-9]{1,5})$ ]]; then
+                        s_p=$((10#${BASH_REMATCH[1]}))
+                        e_p=$((10#${BASH_REMATCH[2]}))
+                        if (( s_p >= 1 && s_p <= 65535 && e_p >= 1 && e_p <= 65535 && s_p <= e_p )); then
+                            update_config_key "listen" ":${s_p}-${e_p}"
+                            restart_and_check_service
+                            echo "端口跳跃范围已更新为 :${s_p}-${e_p}"
+                            break
+                        fi
+                    fi
+                    echo "错误：请输入合法的端口范围（如 30000-40000，起始端口 <= 结束端口）。"
+                done
                 ;;
             3)
                 read_config_values
@@ -488,7 +462,7 @@ manage_menu() {
 
 install_flow() {
     if [ "$HAS_NET_ADMIN" -eq 1 ]; then
-        echo "当前进程具有 CAP_NET_ADMIN：将安装端口跳跃所需的网络工具，并支持配置监听端口与端口跳跃。"
+        echo "当前进程具有 CAP_NET_ADMIN：将安装端口跳跃所需的网络工具，并允许输入端口范围。"
     else
         echo "当前进程缺少 CAP_NET_ADMIN：跳过端口跳跃所需的网络工具，仅允许输入单个端口。"
     fi
@@ -525,17 +499,12 @@ install_flow() {
     fi
     echo "Hysteria 下载完成。"
 
-    prompt_single_port "监听端口" ""
-    HOP_RANGE_INPUT=""
-    if [ "$HAS_NET_ADMIN" -eq 1 ]; then
-        prompt_port_hop_range "1" ""
-    fi
-
+    prompt_port_or_range "监听端口或端口范围" ""
     GENPASS=$(generate_password)
     prompt_bandwidth_mbps "100" "200"
 
     ensure_cert
-    write_config "$SINGLE_PORT_INPUT" "$HOP_RANGE_INPUT" "$GENPASS" "$BW_UP" "$BW_DOWN"
+    write_config "$PORT_INPUT" "$GENPASS" "$BW_UP" "$BW_DOWN"
     ensure_openrc_service
     restart_and_check_service
 
