@@ -1,6 +1,8 @@
 #!/bin/sh
 if [ -z "${BASH_VERSION:-}" ]; then
-    apk add --no-cache bash
+    if ! command -v bash >/dev/null 2>&1; then
+        apk add --no-cache bash
+    fi
     exec bash "$0" "$@"
 fi
 
@@ -185,16 +187,64 @@ restart_and_check_service() {
 }
 
 read_config_values() {
-    CFG_LISTEN=$(awk -F': *' '/^listen:/ {gsub(/^:/, "", $2); print $2; exit}' "$CONFIG_FILE" 2>/dev/null || true)
-    CFG_PASS=$(awk -F': *' '/^  password:/ {print $2; exit}' "$CONFIG_FILE" 2>/dev/null || true)
-    CFG_UP=$(awk -F': *' '/^  up:/ {print $2; exit}' "$CONFIG_FILE" 2>/dev/null || true)
-    CFG_DOWN=$(awk -F': *' '/^  down:/ {print $2; exit}' "$CONFIG_FILE" 2>/dev/null || true)
-    CFG_FIRST_PORT="${CFG_LISTEN%%-*}"
+    local raw_listen=""
+    raw_listen=$(awk -F': *' '/^listen:/ {
+        sub(/#.*/, "", $2)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+        gsub(/^:/, "", $2)
+        print $2
+        exit
+    }' "$CONFIG_FILE" 2>/dev/null || true)
+
+    CFG_LISTEN="$raw_listen"
+    if [[ "$raw_listen" == *-* ]]; then
+        CFG_PORT="${raw_listen%%-*}"
+        CFG_HOP_RANGE="$raw_listen"
+    else
+        CFG_PORT="$raw_listen"
+        CFG_HOP_RANGE="无（未配置端口跳跃）"
+    fi
+
+    CFG_PASS=$(awk -F': *' '/^[[:space:]]*password:/ {
+        sub(/#.*/, "", $2)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+        gsub(/^["'\'']|["'\'']$/, "", $2)
+        print $2
+        exit
+    }' "$CONFIG_FILE" 2>/dev/null || true)
+
+    CFG_UP=$(awk -F': *' '
+        /^bandwidth:/ { in_bw=1; next }
+        in_bw && /^[^[:space:]]/ { in_bw=0 }
+        in_bw && /^[[:space:]]*up:/ {
+            sub(/#.*/, "", $2)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+            gsub(/^["'\'']|["'\'']$/, "", $2)
+            print $2
+            exit
+        }
+    ' "$CONFIG_FILE" 2>/dev/null || true)
+
+    CFG_DOWN=$(awk -F': *' '
+        /^bandwidth:/ { in_bw=1; next }
+        in_bw && /^[^[:space:]]/ { in_bw=0 }
+        in_bw && /^[[:space:]]*down:/ {
+            sub(/#.*/, "", $2)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+            gsub(/^["'\'']|["'\'']$/, "", $2)
+            print $2
+            exit
+        }
+    ' "$CONFIG_FILE" 2>/dev/null || true)
 }
 
 get_ipv4() {
     local ip=""
-    ip=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
+    if command -v curl >/dev/null 2>&1; then
+        ip=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
+    elif command -v wget >/dev/null 2>&1; then
+        ip=$(wget -4 -qO- -T 5 https://api.ipify.org 2>/dev/null || true)
+    fi
     if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
         printf '%s' "$ip"
     fi
@@ -202,7 +252,11 @@ get_ipv4() {
 
 get_ipv6() {
     local ip=""
-    ip=$(curl -6 -fsS --max-time 5 https://api6.ipify.org 2>/dev/null || true)
+    if command -v curl >/dev/null 2>&1; then
+        ip=$(curl -6 -fsS --max-time 5 https://api6.ipify.org 2>/dev/null || true)
+    elif command -v wget >/dev/null 2>&1; then
+        ip=$(wget -6 -qO- -T 5 https://api6.ipify.org 2>/dev/null || true)
+    fi
     if [[ "$ip" == *:* && "$ip" != *[!0-9a-fA-F:]* ]]; then
         printf '%s' "$ip"
     fi
@@ -222,7 +276,7 @@ make_url() {
         "$pass" "$url_host" "$port" "$sha256" "$DEFAULT_SNI" "$label"
 }
 
-print_urls_and_cert() {
+print_parsed_summary_and_urls() {
     read_config_values
     local server_ipv4=""
     local server_ipv6=""
@@ -231,24 +285,27 @@ print_urls_and_cert() {
 
     server_ipv4=$(get_ipv4 || true)
     server_ipv6=$(get_ipv6 || true)
-    cert_sha256=$(openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':')
+    if [ -f "$CERT_FILE" ] && command -v openssl >/dev/null 2>&1; then
+        cert_sha256=$(openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':')
+    fi
 
-    echo "监听端口/范围：${CFG_LISTEN:-未知}"
-    echo "当前密码：${CFG_PASS:-未知}"
-    echo "上传带宽：${CFG_UP:-未设置}"
-    echo "下载带宽：${CFG_DOWN:-未设置}"
-    echo "SNI：$DEFAULT_SNI"
-    echo ""
+    echo "------------------------------------------------------------------------"
+    echo "解析后的当前配置信息："
+    echo "端口（起始/单端口）：${CFG_PORT:-未解析到}"
+    echo "端口跳跃范围：${CFG_HOP_RANGE:-未解析到}"
+    echo "密码：${CFG_PASS:-未解析到}"
+    echo "带宽：上传 ${CFG_UP:-未设置} / 下载 ${CFG_DOWN:-未设置}"
+    echo "------------------------------------------------------------------------"
 
     if [ -n "$server_ipv4" ]; then
         echo "IPv4 链接："
-        make_url "$server_ipv4" "ipv4-$server_ipv4" "$CFG_PASS" "$CFG_FIRST_PORT" "$cert_sha256"
+        make_url "$server_ipv4" "ipv4-$server_ipv4" "$CFG_PASS" "$CFG_PORT" "$cert_sha256"
         echo
         url_count=$((url_count + 1))
     fi
     if [ -n "$server_ipv6" ]; then
         echo "IPv6 链接："
-        make_url "$server_ipv6" "ipv6-$server_ipv6" "$CFG_PASS" "$CFG_FIRST_PORT" "$cert_sha256"
+        make_url "$server_ipv6" "ipv6-$server_ipv6" "$CFG_PASS" "$CFG_PORT" "$cert_sha256"
         echo
         url_count=$((url_count + 1))
     fi
@@ -260,7 +317,11 @@ print_urls_and_cert() {
 print_cert_only() {
     echo "------------------------------------------------------------------------"
     echo "自签名证书 ($CERT_FILE)："
-    cat "$CERT_FILE"
+    if [ -f "$CERT_FILE" ]; then
+        cat "$CERT_FILE"
+    else
+        echo "未找到自签名证书文件 $CERT_FILE"
+    fi
     echo "------------------------------------------------------------------------"
 }
 
@@ -280,9 +341,9 @@ update_bandwidth_in_config() {
     if grep -qE "^bandwidth:" "$CONFIG_FILE"; then
         awk -v up="$up_val" -v down="$down_val" '
             /^bandwidth:/ { in_bw=1; print; next }
-            in_bw && /^  up:/ { print "  up: " up; next }
-            in_bw && /^  down:/ { print "  down: " down; next }
             in_bw && /^[^[:space:]]/ { in_bw=0 }
+            in_bw && /^[[:space:]]*up:/ { print "  up: " up; next }
+            in_bw && /^[[:space:]]*down:/ { print "  down: " down; next }
             { print }
         ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
     else
@@ -296,18 +357,19 @@ EOF
 }
 
 manage_menu() {
-    echo "检测到已安装 Hysteria 2，跳过依赖更新与安装流程。"
+    echo "检测到已安装 Hysteria 2，跳过更新依赖与安装流程。"
     echo "------------------------------------------------------------------------"
     echo "当前配置文件内容（$CONFIG_FILE）："
     echo "------------------------------------------------------------------------"
     cat "$CONFIG_FILE"
-    echo "------------------------------------------------------------------------"
+    print_parsed_summary_and_urls
+    print_cert_only
 
     while true; do
         echo ""
         echo "请选择操作："
-        echo "1. 端口（修改单端口）"
-        echo "2. 端口跳跃（修改端口范围）"
+        echo "1. 端口"
+        echo "2. 端口跳跃"
         echo "3. 密码"
         echo "4. 带宽"
         echo "5. URL查看"
@@ -319,8 +381,8 @@ manage_menu() {
             1)
                 read_config_values
                 while true; do
-                    read -r -p "请输入新的单个监听端口 [1-65535，默认 ${CFG_FIRST_PORT:-20000}]: " new_port
-                    new_port=${new_port:-${CFG_FIRST_PORT:-20000}}
+                    read -r -p "请输入新的单个监听端口 [1-65535，默认 ${CFG_PORT:-20000}]: " new_port
+                    new_port=${new_port:-${CFG_PORT:-20000}}
                     if [[ "$new_port" =~ ^[0-9]{1,5}$ ]] && (( 10#$new_port >= 1 && 10#$new_port <= 65535 )); then
                         update_config_key "listen" ":${10#$new_port}"
                         restart_and_check_service
@@ -370,7 +432,7 @@ manage_menu() {
                 echo "带宽已更新为：上传 $BW_UP / 下载 $BW_DOWN"
                 ;;
             5)
-                print_urls_and_cert
+                print_parsed_summary_and_urls
                 ;;
             6)
                 print_cert_only
@@ -434,52 +496,9 @@ install_flow() {
     ensure_openrc_service
     restart_and_check_service
 
-    SERVER_IPV4=$(get_ipv4 || true)
-    SERVER_IPV6=$(get_ipv6 || true)
-    CERT_SHA256=$(openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 |
-        cut -d= -f2 | tr -d ':')
-
-    echo "------------------------------------------------------------------------"
-    echo "Hysteria 2 安装配置完成"
-    echo "当前架构：$HY_ARCH"
-    echo "监听端口/范围：$PORT_INPUT"
-    if [ "$HAS_NET_ADMIN" -eq 1 ]; then
-        echo "CAP_NET_ADMIN：具备"
-    else
-        echo "CAP_NET_ADMIN：缺少"
-    fi
-    echo "UUID 密码：$GENPASS"
-    echo "上传带宽：$BW_UP"
-    echo "下载带宽：$BW_DOWN"
-    echo "SNI：$DEFAULT_SNI"
-    echo "配置文件：$CONFIG_FILE"
-    echo ""
-
-    URL_COUNT=0
-    if [ -n "$SERVER_IPV4" ]; then
-        echo "IPv4 链接："
-        make_url "$SERVER_IPV4" "ipv4-$SERVER_IPV4" "$GENPASS" "$FIRST_PORT" "$CERT_SHA256"
-        echo
-        URL_COUNT=$((URL_COUNT + 1))
-    fi
-    if [ -n "$SERVER_IPV6" ]; then
-        echo "IPv6 链接："
-        make_url "$SERVER_IPV6" "ipv6-$SERVER_IPV6" "$GENPASS" "$FIRST_PORT" "$CERT_SHA256"
-        echo
-        URL_COUNT=$((url_count + 1))
-    fi
-    if [ "$URL_COUNT" -eq 0 ]; then
-        echo "警告：未能自动获取公网 IPv4 或 IPv6 地址。"
-        echo "请检查服务器网络和 curl 出站连通性，再手动替换 URL 中的服务器地址。"
-    fi
-
-    echo "自启动已配置（OpenRC default runlevel）。"
-    echo "查看状态：service hysteria status"
-    echo "重启服务：service hysteria restart"
-    print_cert_only
+    manage_menu
 }
 
-# 主入口：检测是否已安装 Hysteria 2 及生成配置文件
 if [ -x "$BIN_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     manage_menu
 else
