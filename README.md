@@ -7,7 +7,7 @@
 
 ```bash
 wget -O hy2.sh \
-  https://raw.githubusercontent.com/Dumbledore2233/Alpine-install-hysteria2/refs/heads/main/hy2.sh \
+  https://raw.githubusercontent.com/Dumbledore2233/alpine-install-hysteria2/refs/heads/main/hy2.sh \
   && sh hy2.sh
 ```
 
