@@ -72,8 +72,8 @@ prompt_port_or_range() {
 }
 
 prompt_bandwidth_mbps() {
-    local current_up="${1:-100}"
-    local current_down="${2:-200}"
+    local current_up="${1:-0}"
+    local current_down="${2:-0}"
     local up_num=""
     local down_num=""
 
@@ -373,7 +373,6 @@ EOF
 manage_menu() {
     echo "检测到已安装 Hysteria 2，跳过更新依赖与安装流程。"
     print_parsed_summary_and_urls
-    print_cert_only
 
     while true; do
         echo ""
@@ -438,7 +437,7 @@ manage_menu() {
                 read_config_values
                 cur_up_num="${CFG_UP%% *}"
                 cur_down_num="${CFG_DOWN%% *}"
-                prompt_bandwidth_mbps "${cur_up_num:-100}" "${cur_down_num:-200}"
+                prompt_bandwidth_mbps "${cur_up_num:-0}" "${cur_down_num:-0}"
                 update_bandwidth_in_config "$BW_UP" "$BW_DOWN"
                 restart_and_check_service
                 echo "带宽已更新为：上传 $BW_UP / 下载 $BW_DOWN"
@@ -501,7 +500,7 @@ install_flow() {
 
     prompt_port_or_range "监听端口或端口范围" ""
     GENPASS=$(generate_password)
-    prompt_bandwidth_mbps "100" "200"
+    prompt_bandwidth_mbps "0" "0"
 
     ensure_cert
     write_config "$PORT_INPUT" "$GENPASS" "$BW_UP" "$BW_DOWN"
