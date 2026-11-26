@@ -1,4 +1,4 @@
-# Alpine-install-hysteria2
+# alpine-install-hysteria2
 
 自用Alpine系统下一键安装hysteria2脚本  
 脚本为zrlhk作者的修改版，增加对Alpine系统的架构检测和一键安装，适用于Nat机器  
